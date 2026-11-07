@@ -10,6 +10,12 @@
 # AllowRemoteDesktopFullResize=1 in NCentralRDViewer.ini) must stay on, or it refuses to
 # go below ~1216x750 and smaller windows clip it.
 #
+# Wine cannot switch a running virtual desktop to a portrait size (taller than wide): its
+# virtual mode list (win32u get_virtual_modes) transposes a portrait registry size and
+# drops portrait modes larger than the host's primary screen. For a portrait window, e.g.
+# a half-width tile, the desktop is made square at the window's width instead, so the
+# viewer stays fully visible with an empty strip below it.
+#
 # Wine also asks to leave fullscreen whenever it resizes its desktop to anything but the X
 # primary screen size. ~/.config/hypr/ncentral.lua tells Hyprland to ignore that
 # (suppress_event, applies to newly opened windows); as a backstop, a fullscreen or maximized
@@ -20,7 +26,7 @@ flock -n 8 || exit 0
 
 export WINEDEBUG=-all
 wineres="$HOME/.local/share/ncentral-viewer/wineres.exe.so"
-applied=$(wine reg query 'HKCU\Software\Wine\Explorer\Desktops' /v Default 2>/dev/null 8>&- | awk '/Default/{print $3}' | tr -d '\r')
+applied="" # window size last synced; empty forces one sync at start
 pending="" seen=0
 
 # Put back the fullscreen mode ($1: 1 maximized, 2 fullscreen) if Wine knocked it off.
@@ -43,15 +49,17 @@ while pgrep -x wineserver >/dev/null; do
   seen=1
   read -r addr w h _ fullscreen _ <<<"$info"
   size="${w}x$h"
+  tw=$w th=$h
+  (( th > tw )) && th=$tw # portrait window: square desktop (see above)
 
   if (( w >= 640 && h >= 480 )) && [[ $size != "$applied" ]]; then
     if [[ $size == "$pending" ]]; then # unchanged for one interval: the resize settled
-      wine reg add 'HKCU\Software\Wine\Explorer\Desktops' /v Default /d "$size" /f >/dev/null 2>&1 8>&-
-      wine "$wineres" "$w" "$h" >/dev/null 2>&1 8>&-
+      wine reg add 'HKCU\Software\Wine\Explorer\Desktops' /v Default /d "${tw}x$th" /f >/dev/null 2>&1 8>&-
+      wine "$wineres" "$tw" "$th" >/dev/null 2>&1 8>&-
       keep_fullscreen "$fullscreen"
       # Refit once more after things settle: the viewer can re-place itself late.
       sleep 1
-      wine "$wineres" "$w" "$h" >/dev/null 2>&1 8>&-
+      wine "$wineres" "$tw" "$th" >/dev/null 2>&1 8>&-
       keep_fullscreen "$fullscreen"
       applied=$size
       sleep 0.5 # Wine's request can trail the change slightly

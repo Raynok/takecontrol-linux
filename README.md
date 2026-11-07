@@ -123,7 +123,16 @@ window manager to leave fullscreen, so the window falls back to its smaller size
 (`suppress_event`), and `ncentral-resize-sync` puts back the fullscreen or maximized
 state right after each resize as a backstop.
 
-### 7. Omarchy floating mode and transparency
+### 7. Portrait windows (e.g. a half-width tile)
+A Wine virtual desktop cannot be switched to a portrait size (taller than wide) while it
+runs. Wine's virtual mode list (`get_virtual_modes` in `dlls/win32u/sysparams.c`,
+Wine 11.20) transposes a portrait registry size, and drops portrait modes larger than
+the host's primary screen. **Fix:** for a portrait window `ncentral-resize-sync` uses a
+square desktop at the window's width. The viewer stays fully visible, with an empty
+strip below it; with *Always fit to Window* the remote screen would be letterboxed
+there anyway.
+
+### 8. Omarchy floating mode and transparency
 **Fix:** a float rule of its own keeps Omarchy's floating-workspace mode from claiming
 the window, it opens fullscreen, and it is kept fully opaque.
 
