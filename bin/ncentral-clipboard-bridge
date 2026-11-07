@@ -1,0 +1,81 @@
+#!/bin/bash
+# Seamless clipboard both ways for the Take Control viewer under Wine (Hyprland 0.56).
+#
+# Linux -> remote: Hyprland only serves clipboard data to XWayland apps while an XWayland
+# window has keyboard focus ("[xwm] Ignoring clipboard access: xwayland not in focus").
+# The viewer reads the clipboard the instant it changes, while you are still in the Linux
+# app you copied from, so the read is refused. When the Wine Desktop gains focus and the
+# clipboard changed since it last had focus, offer the same content again; the viewer now
+# reads it while focused and sends it to the remote.
+#
+# Remote -> Linux: the viewer puts remote copies on Wine's clipboard fine, but Hyprland's
+# XWayland->Wayland transfer from Wine stalls, so pasting in Linux apps hangs. When focus
+# leaves the Wine Desktop and Wine owns the clipboard, read it directly over X11
+# (xclip-get) and put it on the Wayland clipboard with wl-copy.
+
+exec 8>"${XDG_RUNTIME_DIR:-/tmp}/ncentral-clipboard-bridge.lock"
+flock -n 8 || exit 0
+
+sock="$XDG_RUNTIME_DIR/hypr/$HYPRLAND_INSTANCE_SIGNATURE/.socket2.sock"
+xget="$HOME/.local/share/ncentral-viewer/xclip-get"
+last=""
+
+clip_hash() {
+  { timeout 2 wl-paste -l 2>/dev/null; timeout 2 wl-paste 2>/dev/null; } | md5sum | cut -d' ' -f1
+}
+
+# Linux -> Wine: offer the current Wayland clipboard again (never an empty or cut-off copy).
+reoffer() {
+  local types tmp
+  types=$(timeout 2 wl-paste -l 2>/dev/null) || return
+  tmp=$(mktemp) || return
+  if grep -q '^text/plain' <<<"$types"; then
+    timeout 2 wl-paste -n -t 'text/plain;charset=utf-8' >"$tmp" 2>/dev/null && [[ -s $tmp ]] &&
+      wl-copy -t 'text/plain;charset=utf-8' <"$tmp" 8>&-
+  elif grep -qx 'image/png' <<<"$types"; then
+    timeout 5 wl-paste -t image/png >"$tmp" 2>/dev/null && [[ -s $tmp ]] && wl-copy -t image/png <"$tmp" 8>&-
+  fi
+  rm -f "$tmp"
+}
+
+# Wine -> Linux: copy what Wine owns onto the Wayland clipboard.
+export_wine() {
+  local targets tmp
+  "$xget" --foreign || return 1
+  targets=$("$xget" --targets) || return 1
+  tmp=$(mktemp) || return 1
+  if grep -qx UTF8_STRING <<<"$targets" && "$xget" UTF8_STRING >"$tmp" && [[ -s $tmp ]]; then
+    wl-copy -t 'text/plain;charset=utf-8' <"$tmp" 8>&-
+  elif grep -qx image/png <<<"$targets" && "$xget" image/png >"$tmp" && [[ -s $tmp ]]; then
+    wl-copy -t image/png <"$tmp" 8>&-
+  fi
+  rm -f "$tmp"
+}
+
+# Fingerprint of the clipboard; "wine" while Wine owns it (reading it through Hyprland would stall).
+clip_state() {
+  if "$xget" --foreign; then echo wine; else clip_hash; fi
+}
+
+in_wine=0
+socat -U - "UNIX-CONNECT:$sock" | while IFS= read -r line; do
+  [[ $line == activewindow\>\>* ]] || continue
+  pgrep -x wineserver >/dev/null || exit 0 # Wine is gone
+  if [[ $line == 'activewindow>>explorer.exe,Wine Desktop' ]]; then
+    (( in_wine )) && continue
+    in_wine=1
+    sleep 0.3 # let keyboard focus settle on XWayland
+    now=$(clip_state)
+    if [[ $now != wine && $now != "$last" ]]; then
+      reoffer
+      last=$(clip_state)
+    fi
+  elif (( in_wine )); then
+    in_wine=0
+    sleep 0.2
+    export_wine
+    # Remember what the clipboard held when we left (including anything copied
+    # from the remote), so returning without a new copy does not echo it back.
+    last=$(clip_state)
+  fi
+done

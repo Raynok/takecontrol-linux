@@ -1,0 +1,7 @@
+[Desktop Entry]
+Name=N-central Take Control Viewer (@SCHEME@)
+Exec=@BIN@/ncentral-viewer %u
+Terminal=false
+Type=Application
+NoDisplay=true
+MimeType=x-scheme-handler/@SCHEME@;

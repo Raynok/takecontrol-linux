@@ -1,0 +1,65 @@
+#!/bin/bash
+# Keep the Wine virtual desktop the same size as its Hyprland window, so the Take Control
+# viewer (maximized inside it) always fits, whatever monitor, layout or size the window has.
+#
+# Wine only accepts its standard modes plus the registry's Explorer\Desktops\Default size,
+# so that value is set first; wineres then switches the desktop to it and re-maximizes the
+# viewer, which Wine otherwise leaves at its old size.
+#
+# The viewer's own setting "Allow resize below the minimum threshold" (Preferences menu;
+# AllowRemoteDesktopFullResize=1 in NCentralRDViewer.ini) must stay on, or it refuses to
+# go below ~1216x750 and smaller windows clip it.
+#
+# Wine also asks to leave fullscreen whenever it resizes its desktop to anything but the X
+# primary screen size. ~/.config/hypr/ncentral.lua tells Hyprland to ignore that
+# (suppress_event, applies to newly opened windows); as a backstop, a fullscreen or maximized
+# state the window had before a resize is put back during and just after it.
+
+exec 8>"${XDG_RUNTIME_DIR:-/tmp}/ncentral-resize-sync.lock"
+flock -n 8 || exit 0
+
+export WINEDEBUG=-all
+wineres="$HOME/.local/share/ncentral-viewer/wineres.exe.so"
+applied=$(wine reg query 'HKCU\Software\Wine\Explorer\Desktops' /v Default 2>/dev/null 8>&- | awk '/Default/{print $3}' | tr -d '\r')
+pending="" seen=0
+
+# Put back the fullscreen mode ($1: 1 maximized, 2 fullscreen) if Wine knocked it off.
+keep_fullscreen() {
+  local want=$1 now
+  [[ $want == 0 ]] && return
+  now=$(hyprctl clients -j | jq -r --arg a "$addr" '.[] | select(.address == $a) | .fullscreen')
+  [[ $now == 0 ]] || return
+  local mode=fullscreen; [[ $want == 1 ]] && mode=maximized
+  hyprctl dispatch "hl.dsp.window.fullscreen({ mode = \"$mode\", action = \"set\", window = \"address:$addr\" })" >/dev/null
+}
+
+while pgrep -x wineserver >/dev/null; do
+  info=$(hyprctl clients -j | jq -r 'first(.[] | select(.class == "explorer.exe" and .title == "Wine Desktop"))
+    | "\(.address) \(.size[0]) \(.size[1]) \(.floating) \(.fullscreen) \(.monitor)"')
+  if [[ -z $info ]]; then
+    (( seen )) && break # window closed
+    sleep 1; continue
+  fi
+  seen=1
+  read -r addr w h _ fullscreen _ <<<"$info"
+  size="${w}x$h"
+
+  if (( w >= 640 && h >= 480 )) && [[ $size != "$applied" ]]; then
+    if [[ $size == "$pending" ]]; then # unchanged for one interval: the resize settled
+      wine reg add 'HKCU\Software\Wine\Explorer\Desktops' /v Default /d "$size" /f >/dev/null 2>&1 8>&-
+      wine "$wineres" "$w" "$h" >/dev/null 2>&1 8>&-
+      keep_fullscreen "$fullscreen"
+      # Refit once more after things settle: the viewer can re-place itself late.
+      sleep 1
+      wine "$wineres" "$w" "$h" >/dev/null 2>&1 8>&-
+      keep_fullscreen "$fullscreen"
+      applied=$size
+      sleep 0.5 # Wine's request can trail the change slightly
+      keep_fullscreen "$fullscreen"
+    fi
+    pending=$size
+  else
+    pending=""
+  fi
+  sleep 0.5
+done

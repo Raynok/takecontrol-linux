@@ -1,0 +1,56 @@
+#!/bin/bash
+# Launch the N-central Take Control viewer under Wine (virtual desktop mode).
+# Registered as the handler for the mspancsxvp:// and tcancvp:// links N-central opens.
+# Closing the "Wine Desktop" window (e.g. SUPER+W) shuts Wine down completely.
+
+export WINEPREFIX="${WINEPREFIX:-$HOME/.wine}"
+export WINEDEBUG=-all
+
+viewer="$WINEPREFIX/drive_c/users/$USER/AppData/Local/MSP Anywhere for N-central/Viewer/NCentralRDLdr.exe"
+if [[ ! -f $viewer ]]; then
+  notify-send "Take Control" "Viewer not found in $WINEPREFIX. Run install.sh with the N-able installer." 2>/dev/null
+  echo "Viewer not found: $viewer" >&2
+  exit 1
+fi
+
+# On a fresh start, size the virtual desktop to the focused monitor. Wine only accepts
+# standard resolutions plus this registry size, and ncentral-resize-sync keeps it current.
+if ! pgrep -x wineserver >/dev/null; then
+  size=$(hyprctl monitors -j 2>/dev/null | jq -r '.[] | select(.focused)
+    | (if .transform % 2 == 1 then [.height, .width] else [.width, .height] end)
+    | map(. / .scale | floor) | "\(.[0])x\(.[1])"' 2>/dev/null)
+  if [[ $size =~ ^[0-9]+x[0-9]+$ ]]; then
+    wine reg add 'HKCU\Software\Wine\Explorer\Desktops' /v Default /d "$size" /f >/dev/null 2>&1
+  fi
+fi
+
+wine "$viewer" -- "$@" >/dev/null 2>&1 &
+
+# Only one watcher; later sessions reuse the running Wine desktop.
+exec 9>"${XDG_RUNTIME_DIR:-/tmp}/ncentral-viewer.lock"
+flock -n 9 || exit 0
+
+desktop_open() {
+  hyprctl clients -j | grep -q '"class": "explorer.exe"'
+}
+
+# Wait for the Wine desktop window to appear (first start can be slow).
+for _ in $(seq 1 90); do
+  desktop_open && break
+  sleep 1
+done
+
+# Seamless clipboard both ways (works around Hyprland XWayland clipboard limits).
+"$HOME/.local/bin/ncentral-clipboard-bridge" 9>&- &
+bridge=$!
+# Resize the Wine desktop (and the viewer) to follow its Hyprland window.
+"$HOME/.local/bin/ncentral-resize-sync" 9>&- &
+resizer=$!
+
+# Once the desktop window is gone, stop every Wine process.
+while desktop_open; do
+  sleep 2
+done
+pkill -P "$bridge" 2>/dev/null
+kill "$bridge" "$resizer" 2>/dev/null
+wineserver -k
