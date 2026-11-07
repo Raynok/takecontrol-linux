@@ -34,12 +34,17 @@ fi
 [[ -n ${HYPRLAND_INSTANCE_SIGNATURE:-} ]] ||
   say "Not inside a Hyprland session: installing anyway, but the helpers need Hyprland."
 
+# Wine may already be running a Take Control session: then never wait for it to exit.
+wine_running=false
+pgrep -x wineserver >/dev/null && wine_running=true
+wine_settle() { $wine_running || wineserver -w; }
+
 # --- Viewer -------------------------------------------------------------------------
 if [[ $# -ge 1 ]]; then
   [[ -f $1 ]] || die "installer not found: $1"
   say "Installing the N-able viewer into $WINEPREFIX (silent)"
   (cd "$HOME" && wine "$(realpath "$1")" /S) || die "viewer installer failed"
-  wineserver -w
+  wine_settle
 fi
 [[ -f $viewer_dir/NCentralRDLdr.exe ]] ||
   die "viewer not installed in $WINEPREFIX. Re-run with the MSPA4NCentralViewerInstall*.exe path."
@@ -49,9 +54,11 @@ fi
 # bounces and menus cannot be clicked under Hyprland.
 say "Configuring the Wine virtual desktop"
 wine reg add 'HKCU\Software\Wine\Explorer' /v Desktop /d Default /f >/dev/null
-wine reg add 'HKCU\Software\Wine\Explorer\Desktops' /v Default /d 1920x1080 /f >/dev/null
+# Initial size only; the launcher and ncentral-resize-sync keep it current afterwards.
+wine reg query 'HKCU\Software\Wine\Explorer\Desktops' /v Default >/dev/null 2>&1 ||
+  wine reg add 'HKCU\Software\Wine\Explorer\Desktops' /v Default /d 1920x1080 /f >/dev/null
 wine reg add 'HKCU\Software\Wine\Explorer\Desktops\Default' /v EnableShell /t REG_DWORD /d 0 /f >/dev/null
-wineserver -w
+wine_settle
 
 # --- Viewer setting: allow resizing below its ~1216x750 minimum ----------------------
 ini="$viewer_dir/NCentralRDViewer.ini"
@@ -107,6 +114,19 @@ if [[ -f $hypr/hyprland.lua ]]; then
 else
   say "No ~/.config/hypr/hyprland.lua (Lua config) found. Add the window rules from"
   say "  README.md (Hyprland rules) to your config by hand."
+fi
+
+# A session is open: swap its helpers for the new versions (each one holds a lock, so
+# wait for the old ones to exit before starting the new ones).
+if $wine_running && pgrep -f "^/bin/bash $bin/ncentral-(clipboard-bridge|resize-sync)" >/dev/null; then
+  say "Restarting the helpers of the running session"
+  for p in $(pgrep -f "^/bin/bash $bin/ncentral-(clipboard-bridge|resize-sync)"); do
+    pkill -P "$p" 2>/dev/null || true
+    kill "$p" 2>/dev/null || true
+  done
+  sleep 2
+  setsid -f "$bin/ncentral-clipboard-bridge" >/dev/null 2>&1
+  setsid -f "$bin/ncentral-resize-sync" >/dev/null 2>&1
 fi
 
 say "Done. Click Take Control in N-central to start a session."
